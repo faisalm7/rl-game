@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The feed | POLISCI 158</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; background: #f7f5f0; color: #222b29; font: 16px/1.55 system-ui, sans-serif; }
+main { max-width: 1000px; margin: 35px auto; padding: 0 22px 40px; }
+h1 { font-size: 38px; margin: 3px 0; } h2 { margin-top: 0; font-size: 22px; }
+p { margin: 8px 0 18px; } .muted { color: #60706a; font-size: 14px; }
+.box { background: white; border: 1px solid #d9dfd8; border-radius: 12px; padding: 22px; margin: 20px 0; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+button, select, input { font: inherit; border: 1px solid #bccbc2; border-radius: 7px; padding: 9px 12px; }
+button { background: #edf3ed; color: #18392a; cursor: pointer; } button:hover { background: #dcebdc; }
+button:disabled { opacity: .5; cursor: wait; } .posts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.posts button { text-align: left; } .posts small { display: block; color: #52615b; }
+.stats { display: flex; gap: 26px; flex-wrap: wrap; margin: 16px 0; } .stats b { font-size: 23px; }
+label { display: flex; flex-direction: column; font-size: 14px; } input { width: 110px; }
+#log { min-height: 28px; } #curve { width: 100%; height: auto; display: block; }
+.green { color: #26714e; } .purple { color: #7041a3; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; } td, th { padding: 8px; border-bottom: 1px solid #e6eae5; text-align: left; }
+@media(max-width: 640px) { .posts { grid-template-columns: repeat(2, 1fr); } h1 { font-size: 30px; } .box { padding: 16px; } }
+</style>
+</head>
+<body>
+<main>
+<p class="muted">POLISCI 158 / Reinforcement learning</p>
+<h1>The feed</h1>
+<p>You have six posts to keep an audience informed without losing its trust. Can a reward for clicks ruin that?</p>
+<p><b>The real goal:</b> finish with information at 3 and trust at least 2. These are made-up rules for a small simulation, not claims about real audiences.</p>
+<section class="box">
+<h2>1. Play it</h2>
+<p>You start with trust 3 and information 0. Both stay between 0 and 3. Each button publishes one post. You can also use keys 1-4.</p>
+<div class="posts">
+<button data-post="0">1. News<small>1 click, +1 information</small></button>
+<button data-post="1">2. Sports<small>2 clicks, no other change</small></button>
+<button data-post="2">3. Outrage<small>5 clicks, -1 trust</small></button>
+<button data-post="3">4. Local<small>2 clicks, +1 information, +1 trust</small></button>
+</div>
+<div class="stats" id="stats" aria-live="polite"></div>
+<p id="log" aria-live="polite">Choose a post to begin.</p>
+<button id="new">New game</button>
+</section>
+<section class="box">
+<h2>2. Choose the reward</h2>
+<p>Points are separate from the real goal. Changing any setting starts a fresh agent and game.</p>
+<div class="row">
+<label>Reward option<select id="preset"><option value="default">Public value (default)</option><option value="clicks">Reward clicks</option></select></label>
+<label>New information<input id="info" type="number" value="2" step="1" min="-50" max="50"></label>
+<label>Outrage post<input id="harm" type="number" value="-3" step="1" min="-50" max="50"></label>
+<label>Real goal at end<input id="goal" type="number" value="10" step="1" min="-50" max="50"></label>
+<label>Each click<input id="click" type="number" value="0" step="1" min="-50" max="50"></label>
+<label>Random seed<input id="seed" type="number" value="158" step="1" min="0" max="4294967295"></label>
+</div>
+<p class="muted">The default gives +2 for each information point actually gained, -3 per outrage post, +10 for the real goal at the end, and 0 per click. The second option changes only the click reward to +4.</p>
+</section>
+<section class="box">
+<h2>3. Train the agent</h2>
+<p>112 table entries for states (7 round values x 4 trust levels x 4 information levels), with 4 actions each. This includes terminal states. It explores on 20% of training moves, learns at 0.2, and discounts later rewards by 0.95. Q-values start at zero and ties are broken randomly.</p>
+<div class="row">
+<button id="train100">Train 100 games</button><button id="train1000">Train 1,000 games</button><button id="reset">Reset agent</button><button id="watch">Watch it play</button>
+</div>
+<p id="training" aria-live="polite">0 training games. Watch it play to test the current policy.</p>
+<svg id="curve" viewBox="0 0 760 260" role="img" aria-label="Learning curve"></svg>
+<p class="muted"><span class="purple">Purple: average reward per 50 games (left axis).</span> <span class="green">Green: share reaching the real goal (right axis).</span> Training includes random exploration. Watch it play uses no exploration.</p>
+<button id="record">Record learned game</button>
+<table><thead><tr><th>Reward option</th><th>Games</th><th>Learned posts</th><th>Points</th><th>Real goal</th></tr></thead><tbody id="runs"></tbody></table>
+</section>
+<p class="muted">Built with Codex for the Section 6 lab. All training happens in your browser.</p>
+</main>
+<script>
+// CORE START
+const posts = ["News", "Sports", "Outrage", "Local"];
+const defaults = {info: 2, harm: -3, goal: 10, click: 0};
+function reward(before, after, action, clicks, settings) {
+  let points = (after.info - before.info) * settings.info; // Pay only for new information.
+  if (action === 2) points += settings.harm; // Charge for every outrage post, even at zero trust.
+  points += clicks * settings.click; // A tempting proxy: raw engagement.
+  if (after.round === 6 && realGoal(after)) points += settings.goal; // Pay for the actual outcome once.
+  return points;
+}
+function realGoal(s) { return s.info === 3 && s.trust >= 2; }
+function start() { return {round: 0, trust: 3, info: 0}; }
+function stateId(s) { return (s.round * 4 + s.trust) * 4 + s.info; }
+function step(s, action, settings) {
+  const next = {round: s.round + 1, trust: s.trust, info: s.info};
+  if (action === 0 || action === 3) next.info = Math.min(3, next.info + 1);
+  if (action === 2) next.trust = Math.max(0, next.trust - 1);
+  if (action === 3) next.trust = Math.min(3, next.trust + 1);
+  const clicks = [1, 2, 5, 2][action];
+  return {next, clicks, points: reward(s, next, action, clicks, settings), done: next.round === 6};
+}
+function randomGenerator(seed) {
+  let x = seed >>> 0;
+  return function() { x = (Math.imul(1664525, x) + 1013904223) >>> 0; return x / 4294967296; };
+}
+function bestAction(values, random) {
+  const max = Math.max(...values);
+  const ties = [0, 1, 2, 3].filter(a => Math.abs(values[a] - max) < 1e-10);
+  return ties[Math.floor(random() * ties.length)];
+}
+class Learner {
+  constructor(settings, seed = 158) {
+    this.settings = {...settings}; this.seed = seed; this.random = randomGenerator(seed);
+    this.q = Array.from({length: 112}, () => [0, 0, 0, 0]);
+    this.games = 0; this.history = [];
+  }
+  trainEpisode() {
+    let s = start(), total = 0;
+    while (s.round < 6) {
+      const id = stateId(s);
+      const action = this.random() < 0.2 ? Math.floor(this.random() * 4) : bestAction(this.q[id], this.random);
+      const result = step(s, action, this.settings);
+      const target = result.points + (result.done ? 0 : 0.95 * Math.max(...this.q[stateId(result.next)]));
+      this.q[id][action] += 0.2 * (target - this.q[id][action]); // The Q-learning update.
+      total += result.points; s = result.next;
+    }
+    this.games++;
+    this.history.push({points: total, success: realGoal(s)});
+  }
+  train(n) { for (let i = 0; i < n; i++) this.trainEpisode(); }
+  learnedGame() {
+    // Separate randomness keeps evaluation from changing future training.
+    const random = randomGenerator(this.seed + 1);
+    let s = start(), points = 0, clicks = 0, actions = [];
+    while (s.round < 6) {
+      const action = bestAction(this.q[stateId(s)], random);
+      const result = step(s, action, this.settings);
+      actions.push(action); points += result.points; clicks += result.clicks; s = result.next;
+    }
+    return {actions, points, clicks, state: s, success: realGoal(s)};
+  }
+}
+// CORE END
+const $ = id => document.getElementById(id);
+function settings() { return Object.fromEntries(["info", "harm", "goal", "click"].map(id => [id, Number($(id).value)])); }
+let learner, human, humanPoints, humanClicks, animation = null;
+function renderGame(message) {
+  $("stats").innerHTML = `<span>Round <b>${human.round}/6</b></span><span>Trust <b>${human.trust}/3</b></span><span>Information <b>${human.info}/3</b></span><span>Points <b>${humanPoints}</b></span><span>Clicks <b>${humanClicks}</b></span>`;
+  $("log").textContent = message;
+  document.querySelectorAll("[data-post]").forEach(b => b.disabled = human.round === 6 || animation !== null);
+}
+function newGame() {
+  if (animation !== null) clearInterval(animation);
+  animation = null; human = start(); humanPoints = 0; humanClicks = 0;
+  renderGame("Choose a post to begin.");
+}
+function play(action) {
+  if (human.round >= 6) return;
+  const result = step(human, action, learner.settings);
+  human = result.next; humanPoints += result.points; humanClicks += result.clicks;
+  let message = `${posts[action]}: ${result.clicks} clicks, ${result.points} points.`;
+  if (result.done) message += realGoal(human) ? " Real goal reached." : " Real goal missed.";
+  renderGame(message);
+}
+function drawCurve() {
+  const svg = $("curve"), chunks = [];
+  for (let i = 0; i + 50 <= learner.history.length; i += 50) {
+    const batch = learner.history.slice(i, i + 50);
+    chunks.push({games: i + 50, points: batch.reduce((a,b) => a + b.points, 0) / 50, success: batch.filter(b => b.success).length / 50});
+  }
+  if (!chunks.length) { svg.innerHTML = '<text x="60" y="130" fill="#60706a">Train at least 50 games to see the curve.</text>'; return; }
+  const lo = Math.min(0, ...chunks.map(p => p.points)), hi = Math.max(1, ...chunks.map(p => p.points));
+  const x = n => 60 + n / Math.max(100, learner.games) * 620;
+  const yr = n => 215 - (n - lo) / (hi - lo) * 185;
+  const ys = n => 215 - n * 185;
+  let markup = '';
+  for (let j = 0; j <= 4; j++) {
+    const y = 215 - j * 185 / 4;
+    markup += `<line x1="60" y1="${y}" x2="680" y2="${y}" stroke="#e3e8e2"/><text x="50" y="${y + 5}" text-anchor="end" fill="#7041a3">${(lo + (hi-lo)*j/4).toFixed(1)}</text><text x="690" y="${y+5}" fill="#26714e">${j*25}%</text>`;
+  }
+  markup += `<text x="60" y="245">0</text><text x="680" y="245" text-anchor="end">${learner.games} games</text>`;
+  markup += `<polyline fill="none" stroke="#7041a3" stroke-width="3" points="${chunks.map(p=>`${x(p.games)},${yr(p.points)}`).join(' ')}"/>`;
+  markup += `<polyline fill="none" stroke="#26714e" stroke-width="3" points="${chunks.map(p=>`${x(p.games)},${ys(p.success)}`).join(' ')}"/>`;
+  svg.innerHTML = markup;
+}
+function resetAgent() {
+  learner = new Learner(settings(), Number($("seed").value)); newGame(); drawCurve();
+  $("training").textContent = "0 training games. Watch it play to test the current policy.";
+}
+function train(n) {
+  newGame(); learner.train(n); drawCurve();
+  const run = learner.learnedGame();
+  $("training").textContent = `${learner.games.toLocaleString()} training games. Learned game: ${run.success ? "real goal reached" : "real goal missed"}, ${run.points} points, ${run.clicks} clicks. Posts: ${run.actions.map(a=>posts[a]).join(", ")}.`;
+}
+document.querySelectorAll("[data-post]").forEach(b => b.addEventListener("click", () => play(Number(b.dataset.post))));
+document.addEventListener("keydown", e => { if (!["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName) && animation === null && ["1","2","3","4"].includes(e.key)) play(Number(e.key)-1); });
+$("new").onclick = newGame;
+$("reset").onclick = resetAgent;
+$("train100").onclick = () => train(100);
+$("train1000").onclick = () => train(1000);
+$("watch").onclick = () => {
+  const run = learner.learnedGame(); newGame(); let i = 0;
+  animation = setInterval(() => {
+    if (i === 5) { clearInterval(animation); animation = null; }
+    play(run.actions[i++]);
+  }, 500);
+  renderGame("Watching the learned policy, with no exploration.");
+};
+$("record").onclick = () => {
+  const run = learner.learnedGame(), row = document.createElement("tr");
+  const label = `Information ${learner.settings.info}, outrage ${learner.settings.harm}, goal ${learner.settings.goal}, click ${learner.settings.click}`;
+  for (const value of [label, learner.games, run.actions.map(a=>posts[a]).join(", "), run.points, run.success ? "Reached" : "Missed"]) { const cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }
+  $("runs").appendChild(row);
+};
+$("preset").onchange = () => {
+  for (const key of ["info","harm","goal","click"]) $(key).value = defaults[key];
+  if ($("preset").value === "clicks") $("click").value = 4;
+  resetAgent();
+};
+for (const id of ["info","harm","goal","click","seed"]) $(id).addEventListener("change", resetAgent);
+resetAgent();
+</script>
+</body>
+</html>
